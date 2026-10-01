@@ -2,6 +2,7 @@
 
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <WiFiClient.h>
 
 #include <ArduinoJson.h>
 
@@ -241,6 +242,93 @@ void fillTagFields(Aircraft* ac, const JsonObject& plane) {
   formatAltitudeTag(plane, ac->alt, sizeof(ac->alt));
 }
 
+/** Helper for fetching JSON from both local (HTTP) and remote (HTTPS) sources. */
+bool fetchUrl(WiFiClient& client, const String& url,
+              const char* array_key, const char* source_name,
+              bool force_identity_encoding) {
+  HTTPClient http;
+  if (!http.begin(client, url)) {
+    Serial.printf("%s: http.begin failed: %s\n", source_name, url.c_str());
+    return false;
+  }
+
+  if (force_identity_encoding) {
+    http.addHeader("Accept-Encoding", "identity");
+  }
+
+  const int code = performGetWithPoll(http);
+  if (code != HTTP_CODE_OK) {
+    Serial.printf("%s: HTTP %d\n", source_name, code);
+    http.end();
+    return false;
+  }
+
+  WiFiClient* stream = http.getStreamPtr();
+  if (stream == nullptr) {
+    Serial.printf("%s: no response stream\n", source_name);
+    http.end();
+    return false;
+  }
+
+  const services::http::BodyFraming framing =
+      http.header("Transfer-Encoding").equalsIgnoreCase("chunked")
+          ? services::http::BodyFraming::kChunked
+          : services::http::BodyFraming::kIdentity;
+
+  PollingSocketSource source(http, *stream, millis() + kRequestTimeoutMs);
+  BodyReader body(source, framing, http.getSize());
+  JsonDocument doc;
+
+  // Build dynamic filter based on array_key
+  JsonDocument filterDoc;
+  JsonObject f = filterDoc[array_key].add<JsonObject>();
+  for (const char* key : {"lat", "lon", "true_heading", "mag_heading", "track",
+                           "dir", "gs", "tas", "ias", "alt_baro", "alt_geom",
+                           "seen_pos", "flight", "hex", "t", "category"}) {
+    f[key] = true;
+  }
+
+  const DeserializationError err = deserializeJson(doc, body,
+                                                  DeserializationOption::Filter(filterDoc));
+  body.drain();
+  http.end();
+
+  if (err) {
+    Serial.printf("%s: JSON parse error: %s\n", source_name, err.c_str());
+    return false;
+  }
+
+  Aircraft parsed[kMaxAircraft];
+  size_t n = 0;
+  JsonArray ac = doc[array_key].as<JsonArray>();
+  if (!ac.isNull()) {
+    for (JsonObject plane : ac) {
+      if (n >= kMaxAircraft) break;
+      if (!plane["lat"].is<float>() || !plane["lon"].is<float>()) continue;
+      if (isOnGround(plane) && !config::kAdsbShowGroundAircraft) continue;
+
+      parsed[n].lat = plane["lat"].as<float>();
+      parsed[n].lon = plane["lon"].as<float>();
+      parsed[n].nose_deg = pickNoseHeading(plane);
+      parsed[n].track_deg = pickTrackHeading(plane);
+      parsed[n].gs_knots = pickGroundSpeed(plane);
+
+      float seen_pos = 0.0f;
+      readJsonFloat(plane, "seen_pos", &seen_pos);
+      if (seen_pos < 0.0f) seen_pos = 0.0f;
+      if (seen_pos > 30.0f) seen_pos = 30.0f;
+      parsed[n].pos_age_ms = static_cast<uint32_t>(seen_pos * 1000.0f);
+
+      fillTagFields(&parsed[n], plane);
+      ++n;
+    }
+  }
+
+  publish(parsed, n);
+  Serial.printf("%s: %u aircraft\n", source_name, static_cast<unsigned>(n));
+  return true;
+}
+
 }  // namespace
 
 void init() {
@@ -277,6 +365,19 @@ size_t snapshotAircraft(Aircraft* out, size_t max_out,
 }
 
 bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
+  // 1. Handle Local tar1090/readsb path if URL is provided
+  if (config::kTar1090Url[0] != '\0') {
+    if (strncmp(config::kTar1090Url, "http://", 7) != 0) {
+      Serial.printf("tar1090: unsupported URL; expected http:// URL: %s\n",
+                     config::kTar1090Url);
+      return false;
+    }
+
+    WiFiClient client;
+    return fetchUrl(client, String(config::kTar1090Url), "aircraft", "tar1090", true);
+  }
+
+  // 2. Fallback to ADS-B.fi (HTTPS) path
   const float dist_nm = kmToNauticalMiles(fetch_radius_km);
 
   String url = kApiBase;
@@ -286,113 +387,9 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
   url += "/dist/";
   url += String(dist_nm, 1);
 
-  // Keep only the fields we render; the rest never reaches RAM.
-  JsonDocument filter;
-  JsonObject f = filter["ac"].add<JsonObject>();
-  for (const char* key :
-       {"lat", "lon", "true_heading", "mag_heading", "track", "dir", "gs",
-        "tas", "ias", "alt_baro", "alt_geom", "seen_pos", "flight", "hex", "t",
-        "category"}) {
-    f[key] = true;
-  }
-
   WiFiClientSecure client;
   client.setInsecure();
-
-  HTTPClient http;
-  if (!http.begin(client, url)) {
-    Serial.println("adsb: http.begin failed");
-    return false;
-  }
-
-  // HTTPClient only records Transfer-Encoding in the collected headers when
-  // it is asked for up front; _transferEncoding itself is private.
-  static const char* kWantedHeaders[] = {"Transfer-Encoding"};
-  http.collectHeaders(kWantedHeaders, 1);
-
-  http.setTimeout(kRequestTimeoutMs);
-  const int code = performGetWithPoll(http);
-  if (code != HTTP_CODE_OK) {
-    Serial.printf("adsb: HTTP %d\n", code);
-    http.end();
-    return false;
-  }
-
-  WiFiClient* stream = http.getStreamPtr();
-  if (stream == nullptr) {
-    Serial.println("adsb: no response stream");
-    http.end();
-    return false;
-  }
-
-  // On HTTP/1.1 the CDN answers with Transfer-Encoding: chunked, and
-  // getStreamPtr() hands back the raw socket -- chunk sizes and all. BodyFramer
-  // strips that framing back off.
-  const services::http::BodyFraming framing =
-      http.header("Transfer-Encoding").equalsIgnoreCase("chunked")
-          ? services::http::BodyFraming::kChunked
-          : services::http::BodyFraming::kIdentity;
-
-  PollingSocketSource source(http, *stream, millis() + kRequestTimeoutMs);
-  BodyReader body(source, framing, http.getSize());
-  JsonDocument doc;
-  const DeserializationError err =
-      deserializeJson(doc, body, DeserializationOption::Filter(filter));
-  // Read off the terminating chunk the parser stopped short of, so the socket
-  // sits at the end of the message. Not needed while every fetch builds its own
-  // connection, but a prerequisite for ever reusing one.
-  body.drain();
-  http.end();
-  if (err) {
-    if (body.framingError()) {
-      Serial.println("adsb: malformed chunked body");
-    } else if (body.bytesRead() == 0) {
-      Serial.println("adsb: empty response");
-    } else {
-      Serial.printf("adsb: JSON parse error: %s\n", err.c_str());
-    }
-    return false;
-  }
-
-  // Parse into a local buffer, then publish atomically so a reader on another
-  // thread never sees a half-updated list.
-  Aircraft parsed[kMaxAircraft];
-  size_t n = 0;
-  JsonArray ac = doc["ac"].as<JsonArray>();
-  if (!ac.isNull()) {
-    for (JsonObject plane : ac) {
-      if (n >= kMaxAircraft) {
-        break;
-      }
-      if (!plane["lat"].is<float>() || !plane["lon"].is<float>()) {
-        continue;
-      }
-      if (isOnGround(plane) && !config::kAdsbShowGroundAircraft) {
-        continue;
-      }
-
-      parsed[n].lat = plane["lat"].as<float>();
-      parsed[n].lon = plane["lon"].as<float>();
-      parsed[n].nose_deg = pickNoseHeading(plane);
-      parsed[n].track_deg = pickTrackHeading(plane);
-      parsed[n].gs_knots = pickGroundSpeed(plane);
-
-      // seen_pos: seconds since this position was measured. Use it as the
-      // dead-reckoning age offset, capped so a very stale fix isn't flung far.
-      float seen_pos = 0.0f;
-      readJsonFloat(plane, "seen_pos", &seen_pos);
-      if (seen_pos < 0.0f) seen_pos = 0.0f;
-      if (seen_pos > 30.0f) seen_pos = 30.0f;
-      parsed[n].pos_age_ms = static_cast<uint32_t>(seen_pos * 1000.0f);
-
-      fillTagFields(&parsed[n], plane);
-      ++n;
-    }
-  }
-
-  publish(parsed, n);
-  Serial.printf("adsb: %u aircraft\n", static_cast<unsigned>(n));
-  return true;
+  return fetchUrl(client, url, "ac", "adsb", false);
 }
 
 }  // namespace services::adsb

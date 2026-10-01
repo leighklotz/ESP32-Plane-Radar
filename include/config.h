@@ -23,6 +23,11 @@ constexpr unsigned long kWifiDownGraceMs = 4000;
 /** Minimum interval between background reconnect tries. */
 constexpr unsigned long kWifiReconnectIntervalMs = 15000;
 
+// --- Local readsb/tar1090 aircraft.json URL. Empty string = use adsb.fi.
+// First implementation intentionally supports plain LAN HTTP only.
+//
+#include "secret.h"
+
 // --- BOOT button (ESP32-C3 Super Mini, active LOW) ---
 constexpr gpio_num_t kBootPin = GPIO_NUM_9;
 constexpr unsigned long kBootResetHoldMs = 3000UL;
