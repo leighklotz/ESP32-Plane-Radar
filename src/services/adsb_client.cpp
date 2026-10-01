@@ -247,8 +247,12 @@ bool fetchUrl(WiFiClient& client, const String& url,
               const char* array_key, const char* source_name,
               bool force_identity_encoding) {
   HTTPClient http;
+
+  Serial.printf("%s: GET %s\n", source_name, url.c_str());
+
   if (!http.begin(client, url)) {
-    Serial.printf("%s: http.begin failed: %s\n", source_name, url.c_str());
+    Serial.printf("%s: http.begin failed: %s\n",
+                  source_name, url.c_str());
     return false;
   }
 
