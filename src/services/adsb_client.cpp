@@ -232,6 +232,31 @@ void formatAltitudeTag(const JsonObject& plane, char* out, size_t out_len) {
   }
 }
 
+/**
+ * Populates the numeric altitude fields for downstream consumers (later
+ * altitude-based marker coloring) so they never re-parse the formatted
+ * alt tag.
+ *
+ * Precedence: numeric alt_baro > numeric alt_geom > "ground" > none.
+ * "ground" counts as a valid 0 ft reading so ground aircraft keep an
+ * altitude for coloring; everything else leaves the fields invalid.
+ */
+void fillAltitudeFields(Aircraft* ac, const JsonObject& plane) {
+  ac->altitude_ft = 0;
+  ac->altitude_valid = false;
+
+  float alt = 0.0f;
+  if (readJsonFloat(plane, "alt_baro", &alt)) {
+    ac->altitude_ft = static_cast<int32_t>(lroundf(alt));
+    ac->altitude_valid = true;
+  } else if (readJsonFloat(plane, "alt_geom", &alt)) {
+    ac->altitude_ft = static_cast<int32_t>(lroundf(alt));
+    ac->altitude_valid = true;
+  } else if (isOnGround(plane)) {
+    ac->altitude_valid = true;  // altitude_ft already 0
+  }
+}
+
 void fillTagFields(Aircraft* ac, const JsonObject& plane) {
   copyJsonStringTrimmed(plane, "flight", ac->callsign, sizeof(ac->callsign));
   if (ac->callsign[0] == '\0') {
@@ -240,6 +265,7 @@ void fillTagFields(Aircraft* ac, const JsonObject& plane) {
 
   copyJsonStringTrimmed(plane, "t", ac->type, sizeof(ac->type));
   formatAltitudeTag(plane, ac->alt, sizeof(ac->alt));
+  fillAltitudeFields(ac, plane);
 }
 
 /** Helper for fetching JSON from both local (HTTP) and remote (HTTPS) sources. */
