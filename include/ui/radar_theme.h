@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace ui::radar {
@@ -99,5 +100,30 @@ extern uint16_t kColorTagType;
 extern uint16_t kColorTagAltitude;
 extern uint16_t kColorRunway;
 extern uint16_t kColorRunwayLabel;
+
+/** Logical RGB of the aircraft altitude color bins, in bin order. Index 0 is
+ *  unknown altitude (white); bins 1..6 are altitude ranges in ft:
+ *  <2000 (red), 2000-4999 (orange), 5000-9999 (yellow), 10000-19999 (green),
+ *  20000-29999 (cyan), >=30000 (violet). */
+struct AltitudeBinColor {
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+};
+constexpr AltitudeBinColor kAircraftAltitudeBins[] = {
+    {255, 255, 255},  // unknown altitude: white
+    {255, 40, 40},    // < 2000 ft: red
+    {255, 140, 0},    // 2000-4999 ft: orange
+    {255, 230, 0},    // 5000-9999 ft: yellow
+    {40, 220, 80},    // 10000-19999 ft: green
+    {40, 220, 255},   // 20000-29999 ft: cyan
+    {190, 100, 255},  // >= 30000 ft: violet
+};
+constexpr size_t kAircraftAltBinCount =
+    sizeof(kAircraftAltitudeBins) / sizeof(kAircraftAltitudeBins[0]);
+
+/** Precomputed RGB565 altitude bin colors (populated in initPalette),
+ *  index-aligned with kAircraftAltitudeBins. */
+extern uint16_t kColorAircraftAltitude[kAircraftAltBinCount];
 
 }  // namespace ui::radar
