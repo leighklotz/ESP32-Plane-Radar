@@ -29,6 +29,7 @@ uint16_t kColorTagType = 0x5DFF;
 uint16_t kColorTagAltitude = 0xFFE0;
 uint16_t kColorRunway = 0x4D5F;
 uint16_t kColorRunwayLabel = 0x7DFF;
+uint16_t kColorAircraftAltitude[kAircraftAltBinCount] = {};
 
 }  // namespace radar
 
@@ -173,19 +174,53 @@ void initTagLabelMetrics() {
   s_tag_label_metrics_ready = true;
 }
 
+/**
+ * Logical RGB -> RGB565 with the same GC9A01 handling as the palette: on a
+ * BGR panel (config::kDisplayRgbOrder) the R/B arguments are swapped so a
+ * logical red renders red on screen.
+ */
+uint16_t aircraftRgb565(uint8_t r, uint8_t g, uint8_t b) {
+  if (config::kDisplayRgbOrder) {
+    return tft.color565(b, g, r);
+  }
+  return tft.color565(r, g, b);
+}
+
+/**
+ * Marker color for an aircraft from its altitude: unknown altitude (or no
+ * valid reading) is white, bin 0; otherwise the precomputed bin color for
+ * the altitude range, per kAircraftAltitudeBins.
+ */
+uint16_t aircraftColorForAltitude(const services::adsb::Aircraft& plane) {
+  if (!plane.altitude_valid) {
+    return radar::kColorAircraftAltitude[0];
+  }
+  const int32_t alt_ft = plane.altitude_ft;
+  int bin;
+  if (alt_ft < 2000) {
+    bin = 1;  // red
+  } else if (alt_ft < 5000) {
+    bin = 2;  // orange
+  } else if (alt_ft < 10000) {
+    bin = 3;  // yellow
+  } else if (alt_ft < 20000) {
+    bin = 4;  // green
+  } else if (alt_ft < 30000) {
+    bin = 5;  // cyan
+  } else {
+    bin = 6;  // violet
+  }
+  return radar::kColorAircraftAltitude[bin];
+}
+
 void initPalette() {
   radar::kColorBackground = tft.color565(radar::kBgR, radar::kBgG, radar::kBgB);
   radar::kColorGrid = tft.color565(radar::kGridR, radar::kGridG, radar::kGridB);
   radar::kColorLabel = tft.color565(255, 255, 255);
   radar::kColorCenter = tft.color565(255, 255, 255);
-  // GC9A01 BGR panel: swap R/B in color565 so logical red renders red on screen.
-  if (config::kDisplayRgbOrder) {
-    radar::kColorAircraft =
-        tft.color565(radar::kAircraftB, radar::kAircraftG, radar::kAircraftR);
-  } else {
-    radar::kColorAircraft =
-        tft.color565(radar::kAircraftR, radar::kAircraftG, radar::kAircraftB);
-  }
+  // GC9A01 BGR panel: swap R/B so logical red renders red on screen.
+  radar::kColorAircraft =
+      aircraftRgb565(radar::kAircraftR, radar::kAircraftG, radar::kAircraftB);
   radar::kColorTrackVector =
       tft.color565(radar::kTrackR, radar::kTrackG, radar::kTrackB);
   radar::kColorTagType =
@@ -196,6 +231,12 @@ void initPalette() {
       tft.color565(radar::kRunwayR, radar::kRunwayG, radar::kRunwayB);
   radar::kColorRunwayLabel = tft.color565(radar::kRunwayLabelR, radar::kRunwayLabelG,
                                           radar::kRunwayLabelB);
+  // Precompute the altitude bin colors once per palette refresh; drawing
+  // only indexes into the table.
+  for (size_t i = 0; i < radar::kAircraftAltBinCount; ++i) {
+    const radar::AltitudeBinColor& bin = radar::kAircraftAltitudeBins[i];
+    radar::kColorAircraftAltitude[i] = aircraftRgb565(bin.r, bin.g, bin.b);
+  }
 }
 
 constexpr float kKmPerDeg = 111.0f;
@@ -296,9 +337,8 @@ bool beyondRingEdgeDotFromLatLon(float lat, float lon, int* out_x, int* out_y) {
   return true;
 }
 
-void drawBeyondRingDot(int x, int y) {
-  s_draw->fillSmoothCircle(x, y, radar::kBeyondRingDotRadiusPx,
-                           radar::kColorAircraft);
+void drawBeyondRingDot(int x, int y, uint16_t color) {
+  s_draw->fillSmoothCircle(x, y, radar::kBeyondRingDotRadiusPx, color);
 }
 
 void clipPointToOuterRing(int x0, int y0, int* x1, int* y1) {
@@ -407,22 +447,41 @@ void applyTagStyle() {
   }
 }
 
-int measureTagBlockWidth(const services::adsb::Aircraft& plane) {
+/** Which tag lines to draw for a plane at the current zoom (ring 3 km). */
+struct TagVisibility {
+  bool callsign;
+  bool type;
+  bool altitude;
+};
+
+TagVisibility tagVisibilityFor(const services::adsb::Aircraft& plane) {
+  const float ring3_km = radar::rangeCurrent().ring3_km;
+  TagVisibility vis;
+  vis.callsign = plane.callsign[0] != '\0' &&
+                 ring3_km <= radar::kAircraftCallsignTextMaxRing3Km;
+  vis.type = plane.type[0] != '\0';
+  vis.altitude = plane.alt[0] != '\0' &&
+                 ring3_km <= radar::kAircraftAltitudeTextMaxRing3Km;
+  return vis;
+}
+
+int measureTagBlockWidth(const services::adsb::Aircraft& plane,
+                         const TagVisibility& vis) {
   applyTagStyle();
   int max_w = 0;
-  if (plane.callsign[0] != '\0') {
+  if (vis.callsign) {
     const int w = s_draw->textWidth(plane.callsign);
     if (w > max_w) {
       max_w = w;
     }
   }
-  if (plane.type[0] != '\0') {
+  if (vis.type) {
     const int w = s_draw->textWidth(plane.type);
     if (w > max_w) {
       max_w = w;
     }
   }
-  if (plane.alt[0] != '\0') {
+  if (vis.altitude) {
     const int w = s_draw->textWidth(plane.alt);
     if (w > max_w) {
       max_w = w;
@@ -435,9 +494,27 @@ void drawAircraftTag(int x, int y, const services::adsb::Aircraft& plane) {
   initTagLabelMetrics();
   applyTagStyle();
 
+  const TagVisibility vis = tagVisibilityFor(plane);
+
+  // Compact layout: only visible lines consume space, so hidden or
+  // unavailable fields take up no vertical or horizontal room.
+  int line_count = 0;
+  if (vis.callsign) {
+    ++line_count;
+  }
+  if (vis.type) {
+    ++line_count;
+  }
+  if (vis.altitude) {
+    ++line_count;
+  }
+  if (line_count == 0) {
+    return;
+  }
+
   const int line_h = s_draw->fontHeight();
-  const int block_w = measureTagBlockWidth(plane);
-  const int block_h = line_h * 3;
+  const int block_w = measureTagBlockWidth(plane, vis);
+  const int block_h = line_h * line_count;
   int ly = y - block_h / 2;
 
   const int symbol_half =
@@ -456,21 +533,20 @@ void drawAircraftTag(int x, int y, const services::adsb::Aircraft& plane) {
   }
   ly = std::max(1, std::min(ly, radar::kSize - block_h - 1));
 
-  if (plane.callsign[0] != '\0') {
+  if (vis.callsign) {
     s_draw->setTextColor(radar::kColorLabel, radar::kColorBackground);
     s_draw->drawString(plane.callsign, anchor_x, ly);
+    ly += line_h;
   }
-  ly += line_h;
-
-  if (plane.type[0] != '\0') {
+  if (vis.type) {
     s_draw->setTextColor(radar::kColorTagType, radar::kColorBackground);
     s_draw->drawString(plane.type, anchor_x, ly);
+    ly += line_h;
   }
-  ly += line_h;
-
-  if (plane.alt[0] != '\0') {
+  if (vis.altitude) {
     s_draw->setTextColor(radar::kColorTagAltitude, radar::kColorBackground);
     s_draw->drawString(plane.alt, anchor_x, ly);
+    ly += line_h;
   }
 }
 
@@ -485,6 +561,7 @@ struct BeyondDotDrawItem {
   int x = 0;
   int y = 0;
   int dist_sq = 0;
+  uint16_t color = 0;
 };
 
 void sortDrawItemsFarFirst(AircraftDrawItem* items, size_t count) {
@@ -556,12 +633,13 @@ void drawAircraft() {
     dots[dot_count].x = dot_x;
     dots[dot_count].y = dot_y;
     dots[dot_count].dist_sq = distSqFromCenter(dot_x, dot_y);
+    dots[dot_count].color = aircraftColorForAltitude(planes[i]);
     ++dot_count;
   }
 
   sortBeyondDotsFarFirst(dots, dot_count);
   for (size_t d = 0; d < dot_count; ++d) {
-    drawBeyondRingDot(dots[d].x, dots[d].y);
+    drawBeyondRingDot(dots[d].x, dots[d].y, dots[d].color);
   }
 
   sortDrawItemsFarFirst(items, draw_count);
@@ -571,7 +649,8 @@ void drawAircraft() {
     const int y = items[d].y;
     drawSpeedVector(x, y, planes[i].nose_deg, planes[i].track_deg,
                     planes[i].gs_knots, radar::kColorTrackVector);
-    drawHeadingTriangle(x, y, planes[i].nose_deg, radar::kColorAircraft);
+    drawHeadingTriangle(x, y, planes[i].nose_deg,
+                        aircraftColorForAltitude(planes[i]));
   }
   for (size_t d = 0; d < draw_count; ++d) {
     const size_t i = items[d].index;
@@ -620,7 +699,7 @@ void drawScaleLabelWithBackground(const char* text, int x, int y) {
   s_draw->drawString(text, x, y);
 }
 
-void drawGridRing(int cx, int cy, int r, uint16_t color) {
+void drawGridRing(int cx, int cy, int r, int color) {
   if (r <= 0) {
     return;
   }
@@ -638,7 +717,7 @@ void drawRings(int cx, int cy, int outer_radius) {
   }
 }
 
-void drawCrosshairs(int cx, int cy, int radius, uint16_t color) {
+void drawCrosshairs(int cx, int cy, int radius, int color) {
   s_draw->drawWideLine(cx, cy - radius, cx, cy + radius,
                        radar::kGridStrokeHalfWidth, color);
   s_draw->drawWideLine(cx - radius, cy, cx + radius, cy,
