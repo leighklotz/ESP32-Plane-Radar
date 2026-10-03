@@ -447,30 +447,6 @@ void applyTagStyle() {
   }
 }
 
-int measureTagBlockWidth(const services::adsb::Aircraft& plane) {
-  applyTagStyle();
-  int max_w = 0;
-  if (plane.callsign[0] != '\0') {
-    const int w = s_draw->textWidth(plane.callsign);
-    if (w > max_w) {
-      max_w = w;
-    }
-  }
-  if (plane.type[0] != '\0') {
-    const int w = s_draw->textWidth(plane.type);
-    if (w > max_w) {
-      max_w = w;
-    }
-  }
-  if (plane.alt[0] != '\0') {
-    const int w = s_draw->textWidth(plane.alt);
-    if (w > max_w) {
-      max_w = w;
-    }
-  }
-  return max_w;
-}
-
 /** Which tag lines to draw for a plane at the current zoom (ring 3 km). */
 struct TagVisibility {
   bool callsign;
@@ -489,15 +465,56 @@ TagVisibility tagVisibilityFor(const services::adsb::Aircraft& plane) {
   return vis;
 }
 
+int measureTagBlockWidth(const services::adsb::Aircraft& plane,
+                         const TagVisibility& vis) {
+  applyTagStyle();
+  int max_w = 0;
+  if (vis.callsign) {
+    const int w = s_draw->textWidth(plane.callsign);
+    if (w > max_w) {
+      max_w = w;
+    }
+  }
+  if (vis.type) {
+    const int w = s_draw->textWidth(plane.type);
+    if (w > max_w) {
+      max_w = w;
+    }
+  }
+  if (vis.altitude) {
+    const int w = s_draw->textWidth(plane.alt);
+    if (w > max_w) {
+      max_w = w;
+    }
+  }
+  return max_w;
+}
+
 void drawAircraftTag(int x, int y, const services::adsb::Aircraft& plane) {
   initTagLabelMetrics();
   applyTagStyle();
 
   const TagVisibility vis = tagVisibilityFor(plane);
 
+  // Compact layout: only visible lines consume space, so hidden or
+  // unavailable fields take up no vertical or horizontal room.
+  int line_count = 0;
+  if (vis.callsign) {
+    ++line_count;
+  }
+  if (vis.type) {
+    ++line_count;
+  }
+  if (vis.altitude) {
+    ++line_count;
+  }
+  if (line_count == 0) {
+    return;
+  }
+
   const int line_h = s_draw->fontHeight();
-  const int block_w = measureTagBlockWidth(plane);
-  const int block_h = line_h * 3;
+  const int block_w = measureTagBlockWidth(plane, vis);
+  const int block_h = line_h * line_count;
   int ly = y - block_h / 2;
 
   const int symbol_half =
@@ -519,18 +536,17 @@ void drawAircraftTag(int x, int y, const services::adsb::Aircraft& plane) {
   if (vis.callsign) {
     s_draw->setTextColor(radar::kColorLabel, radar::kColorBackground);
     s_draw->drawString(plane.callsign, anchor_x, ly);
+    ly += line_h;
   }
-  ly += line_h;
-
   if (vis.type) {
     s_draw->setTextColor(radar::kColorTagType, radar::kColorBackground);
     s_draw->drawString(plane.type, anchor_x, ly);
+    ly += line_h;
   }
-  ly += line_h;
-
   if (vis.altitude) {
     s_draw->setTextColor(radar::kColorTagAltitude, radar::kColorBackground);
     s_draw->drawString(plane.alt, anchor_x, ly);
+    ly += line_h;
   }
 }
 
