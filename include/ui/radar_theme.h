@@ -62,6 +62,10 @@ constexpr int kBeyondRingDotRadiusPx = 4;
 constexpr int kBeyondRingScreenMarginPx = 2;
 /** Target cap height (px) for aircraft tags (bold, slightly above scale label). */
 constexpr int kAircraftTagLabelHeightPx = 13;
+/** Callsign/ICAO tag line hidden when ring 3 is wider than this (km). */
+constexpr float kAircraftCallsignTextMaxRing3Km = 15.0f;
+/** Altitude tag line hidden when ring 3 is wider than this (km). */
+constexpr float kAircraftAltitudeTextMaxRing3Km = 10.0f;
 
 /** RGB565 palette targets (applied in initPalette). */
 constexpr uint8_t kBgR = 4;

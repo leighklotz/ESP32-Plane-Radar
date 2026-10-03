@@ -471,9 +471,29 @@ int measureTagBlockWidth(const services::adsb::Aircraft& plane) {
   return max_w;
 }
 
+/** Which tag lines to draw for a plane at the current zoom (ring 3 km). */
+struct TagVisibility {
+  bool callsign;
+  bool type;
+  bool altitude;
+};
+
+TagVisibility tagVisibilityFor(const services::adsb::Aircraft& plane) {
+  const float ring3_km = radar::rangeCurrent().ring3_km;
+  TagVisibility vis;
+  vis.callsign = plane.callsign[0] != '\0' &&
+                 ring3_km <= radar::kAircraftCallsignTextMaxRing3Km;
+  vis.type = plane.type[0] != '\0';
+  vis.altitude = plane.alt[0] != '\0' &&
+                 ring3_km <= radar::kAircraftAltitudeTextMaxRing3Km;
+  return vis;
+}
+
 void drawAircraftTag(int x, int y, const services::adsb::Aircraft& plane) {
   initTagLabelMetrics();
   applyTagStyle();
+
+  const TagVisibility vis = tagVisibilityFor(plane);
 
   const int line_h = s_draw->fontHeight();
   const int block_w = measureTagBlockWidth(plane);
@@ -496,19 +516,19 @@ void drawAircraftTag(int x, int y, const services::adsb::Aircraft& plane) {
   }
   ly = std::max(1, std::min(ly, radar::kSize - block_h - 1));
 
-  if (plane.callsign[0] != '\0') {
+  if (vis.callsign) {
     s_draw->setTextColor(radar::kColorLabel, radar::kColorBackground);
     s_draw->drawString(plane.callsign, anchor_x, ly);
   }
   ly += line_h;
 
-  if (plane.type[0] != '\0') {
+  if (vis.type) {
     s_draw->setTextColor(radar::kColorTagType, radar::kColorBackground);
     s_draw->drawString(plane.type, anchor_x, ly);
   }
   ly += line_h;
 
-  if (plane.alt[0] != '\0') {
+  if (vis.altitude) {
     s_draw->setTextColor(radar::kColorTagAltitude, radar::kColorBackground);
     s_draw->drawString(plane.alt, anchor_x, ly);
   }
@@ -663,7 +683,7 @@ void drawScaleLabelWithBackground(const char* text, int x, int y) {
   s_draw->drawString(text, x, y);
 }
 
-void drawGridRing(int cx, int cy, int r, uint16_t color) {
+void drawGridRing(int cx, int cy, int r, int color) {
   if (r <= 0) {
     return;
   }
@@ -681,7 +701,7 @@ void drawRings(int cx, int cy, int outer_radius) {
   }
 }
 
-void drawCrosshairs(int cx, int cy, int radius, uint16_t color) {
+void drawCrosshairs(int cx, int cy, int radius, int color) {
   s_draw->drawWideLine(cx, cy - radius, cx, cy + radius,
                        radar::kGridStrokeHalfWidth, color);
   s_draw->drawWideLine(cx - radius, cy, cx + radius, cy,
